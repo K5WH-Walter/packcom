@@ -1,0 +1,236 @@
+name: Build PackCom
+
+on:
+  push:
+    branches: [ "main", "master" ]
+  pull_request:
+    branches: [ "main", "master" ]
+  workflow_dispatch:
+
+jobs:
+
+  # =========================================================================
+  #  Windows  –  MSVC build  +  WiX MSI installer
+  # =========================================================================
+  build-windows:
+    name: Windows (MSVC + WiX MSI)
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
+
+      # ----- Build the application ----------------------------------------
+      - name: Configure CMake
+        run: cmake -S . -B build -G "Visual Studio 17 2022" -A x64
+
+      - name: Build Release
+        run: cmake --build build --config Release
+
+      # ----- Install WiX v4 -----------------------------------------------
+      - name: Install WiX Toolset v4
+        run: dotnet tool install --global wix
+
+      - name: Add WiX UI extension
+        run: wix extension add WixToolset.UI.wixext
+
+      # ----- Determine version from git tag --------------------------------
+      # Tag v0.75 becomes MSI version 0.75.0.0 (4-part dotted form required)
+      - name: Determine version
+        id: ver
+        shell: bash
+        run: |
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+            TAG="${GITHUB_REF#refs/tags/v}"
+            # Pad to 4 parts
+            while [ "$(echo "$TAG" | tr -cd '.' | wc -c)" -lt 3 ]; do
+              TAG="$TAG.0"
+            done
+            echo "msi_version=$TAG" >> "$GITHUB_OUTPUT"
+            echo "display_version=${GITHUB_REF#refs/tags/v}" >> "$GITHUB_OUTPUT"
+          else
+            echo "msi_version=0.0.0.0" >> "$GITHUB_OUTPUT"
+            echo "display_version=dev" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Patch version into WiX source
+        shell: pwsh
+        run: |
+          $ver = "${{ steps.ver.outputs.msi_version }}"
+          (Get-Content installer\PackCom.wxs) `
+            -replace 'Version="0\.75\.0\.0"', "Version=`"$ver`"" |
+            Set-Content installer\PackCom.wxs
+          Write-Host "MSI version set to: $ver"
+
+      # ----- Build the MSI -------------------------------------------------
+      - name: Create artifacts directory
+        run: mkdir -p artifacts
+
+      - name: Build MSI
+        working-directory: installer
+        run: >
+          wix build PackCom.wxs
+          -ext WixToolset.UI.wixext
+          -out ..\artifacts\PackCom-${{ steps.ver.outputs.display_version }}-x64.msi
+
+      # Copy raw exe alongside the MSI
+      - name: Stage standalone exe
+        shell: pwsh
+        run: Copy-Item build\Release\packcom.exe artifacts\packcom-windows-x64.exe
+
+      # ----- Upload artefacts ----------------------------------------------
+      - name: Upload MSI
+        uses: actions/upload-artifact@v4
+        with:
+          name: packcom-msi
+          path: artifacts\PackCom-*-x64.msi
+          if-no-files-found: error
+
+      - name: Upload standalone exe
+        uses: actions/upload-artifact@v4
+        with:
+          name: packcom-windows-exe
+          path: artifacts\packcom-windows-x64.exe
+          if-no-files-found: error
+
+  # =========================================================================
+  #  Linux  –  GCC  →  packcom ELF binary
+  # =========================================================================
+  build-linux:
+    name: Linux (GCC)
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
+
+      - name: Install build tools
+        run: sudo apt-get install -y build-essential cmake
+
+      - name: Configure
+        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+
+      - name: Build
+        run: cmake --build build --parallel
+
+      - name: Upload Linux binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: packcom-linux-x64
+          path: build/packcom
+          if-no-files-found: error
+
+  # =========================================================================
+  #  macOS  –  Clang  →  packcom Mach-O binary
+  # =========================================================================
+  build-macos:
+    name: macOS (Clang)
+    runs-on: macos-latest
+
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
+
+      - name: Configure
+        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+
+      - name: Build
+        run: cmake --build build --parallel
+
+      - name: Upload macOS binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: packcom-macos
+          path: build/packcom
+          if-no-files-found: error
+
+  # =========================================================================
+  #  Release  –  triggered only by a version tag push  (e.g.  git tag v0.75)
+  #  Attaches MSI + standalone exe + Linux + macOS to the GitHub Release page
+  # =========================================================================
+  release:
+    name: Create GitHub Release
+    needs: [build-windows, build-linux, build-macos]
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/v')
+
+    permissions:
+      contents: write
+
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: List downloaded files
+        run: find artifacts -type f | sort
+
+      - name: Make Linux / macOS binaries executable
+        run: |
+          find artifacts -name "packcom" -exec chmod +x {} \;
+          # Rename so the two don't collide (both jobs emit a file called "packcom")
+          mv artifacts/packcom artifacts/packcom-linux-x64 2>/dev/null || true
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: "PackCom ${{ github.ref_name }}"
+          body: |
+            ## PackCom ${{ github.ref_name }}
+
+            Packet Radio Terminal — C++ reconstruction of v0.75 Dev. by Jim Wright (WB4ZJV), 1987.
+
+            ---
+
+            ### Downloads
+
+            | File | Description |
+            |------|-------------|
+            | `PackCom-*-x64.msi` | **Windows installer** — installs to Program Files, Start Menu shortcut, updates PATH |
+            | `packcom-windows-x64.exe` | Windows standalone — no install needed, run directly |
+            | `packcom-linux-x64` | Linux 64-bit binary |
+            | `packcom-macos` | macOS binary |
+
+            ---
+
+            ### Windows — MSI installer (recommended)
+
+            1. Download `PackCom-*-x64.msi` and double-click it.
+            2. Accept the licence → choose install folder → click Install.
+            3. Open **Command Prompt** or **Windows Terminal** and type `packcom`.
+
+            To uninstall: **Settings → Apps → PackCom → Uninstall**
+
+            ### Windows — standalone exe (no install)
+
+            Download `packcom-windows-x64.exe`, open a terminal in the same folder, and run:
+            ```
+            packcom.exe
+            ```
+
+            ### Linux / macOS
+
+            ```bash
+            chmod +x packcom-linux-x64
+            ./packcom-linux-x64
+            ```
+
+            ### First-run tips
+
+            ```
+            packcom /I    # reset PACKCOM.CNF to defaults
+            packcom       # normal start
+            ```
+
+            Press **ALT-H** for the full command reference.  
+            Press **ALT-I** to open the configuration menu.
+          files: |
+            artifacts/PackCom-*-x64.msi
+            artifacts/packcom-windows-x64.exe
+            artifacts/packcom-linux-x64
+            artifacts/packcom-macos
+          draft: false
+          prerelease: false
+          fail_on_unmatched_files: false
