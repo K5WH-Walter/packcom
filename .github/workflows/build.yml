@@ -29,10 +29,10 @@ jobs:
 
       # ----- Install WiX v4 -----------------------------------------------
       - name: Install WiX Toolset v4
-        run: dotnet tool install --global wix
+        run: dotnet tool install --global wix --version 4.0.5
 
       - name: Add WiX UI extension
-        run: wix extension add WixToolset.UI.wixext
+        run: wix extension add WixToolset.UI.wixext/4.0.5
 
       # ----- Determine version from git tag --------------------------------
       # Tag v0.75 becomes MSI version 0.75.0.0 (4-part dotted form required)
