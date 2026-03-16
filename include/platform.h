@@ -11,7 +11,10 @@
 #include <cstdint>
 
 #ifdef _WIN32
-#  define PACKCOM_WINDOWS
+#  ifndef PACKCOM_WINDOWS
+#    define PACKCOM_WINDOWS
+#  endif
+#  define NOMINMAX
 #  include <windows.h>
 #  include <conio.h>
 #else
@@ -75,7 +78,7 @@ void beep();
 
 #ifdef PACKCOM_WINDOWS
 using SerialHandle = HANDLE;
-constexpr SerialHandle INVALID_SERIAL = INVALID_HANDLE_VALUE;
+static const SerialHandle INVALID_SERIAL = INVALID_HANDLE_VALUE;
 #else
 using SerialHandle = int;
 constexpr SerialHandle INVALID_SERIAL = -1;
